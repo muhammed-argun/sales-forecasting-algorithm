@@ -7,24 +7,23 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 from tensorflow.keras.callbacks import EarlyStopping
 
-# ======================
-# 1. VERİYİ YÜKLE
-# ======================
+
+# 1. VERİ SETİNİN YÜKLENMESİ VE BOYUTLARININ TANIMLANMASI
 df = pd.read_csv("hazir_veri_seti_gruplanmis_tumu.csv", index_col='Sinif_Grubu')
 data = df.values
 dates = df.columns
-n_groups = data.shape[0] # Grup sayısı (Hatanın çözümü için kritik)
+n_groups = data.shape[0]  # Matris işlemlerinde boyut uyumsuzluğunu önlemek için grup sayısı referans alınmıştır
 
-# ======================
-# 2. AY FEATURE
-# ======================
+# 2. MEVSİMSELLİK ÖZELLİKLERİNİN EKLEMESİ (CYCLICAL FEATURE ENGINEERING)
+# Zaman serisindeki aylık periyodik döngüleri (mevsimselliği) modele doğrusal olmayan 
+# bir yapıda aktarabilmek adına ay bilgileri sinüs ve kosinüs dönüşümlerine tabi tutulmuştur.
 months = np.array([int(col.split('.')[1]) for col in dates])
 month_sin = np.sin(2 * np.pi * months / 12)
 month_cos = np.cos(2 * np.pi * months / 12)
 
-# ======================
-# 3. SPLIT
-# ======================
+# 3. VERİ SETİNİN KRONOLOJİK OLARAK BÖLÜNMESİ (DATA SPLITTING)
+# Zaman serisi analizlerinde geleceğe yönelik sızıntıyı (data leakage) önlemek amacıyla
+# rastgele bölme yerine belirli tarih sınırları ile kronolojik bölme uygulanmıştır.
 train_end = "2024.12"
 val_end = "2025.05"
 
@@ -32,24 +31,23 @@ train_idx = np.where(dates <= train_end)[0]
 val_idx = np.where((dates > train_end) & (dates <= val_end))[0]
 test_idx = np.where(dates > val_end)[0]
 
-# ======================
-# 4. SCALER (SADECE TRAIN)
-# ======================
+# 4. ÖLÇEKLENDİRME İŞLEMİ (NORMALIZATION & DATA LEAKAGE PREVENTION)
+# Modelin yakınsama hızını artırmak için MinMaxScaler kullanılmıştır. Veri sızıntısını 
+# engellemek adına scaler parametreleri sadece eğitim seti üzerinden fit edilmiştir.
 scaler = MinMaxScaler()
-# Veriyi transpoze edip fit ediyoruz (Sütun bazlı ölçekleme için)
 scaler.fit(data[:, train_idx].T)
 data_scaled = scaler.transform(data.T).T
 
-# ======================
-# 5. PARAMETRE
-# ======================
-look_back = 12
-n_future = len(test_idx)
+# 5. MODEL HİPERPARAMETRELERİ
+look_back = 12  # Geriye dönük bakılacak zaman penceresi (1 yıllık gecikme/lag)
+n_future = len(test_idx)  # Tahmin edilecek ileri projeksiyon adımı
 
-# ======================
-# 6. DATASET OLUŞTURMA
-# ======================
+# 6. KAYDIRMALI ZAMAN PENCERESİ VERİ SETİNİN OLUŞTURULMASI (WINDOWING METHOD)
 def create_dataset(dataset, target_indices):
+    """
+    Çok değişkenli zaman serisi verisini LSTM modelinin giriş mimarisine (3D tensor) 
+    uygun hale getirmek için kaydırmalı pencere yöntemiyle matris oluşturur.
+    """
     X, y = [], []
     for i in range(dataset.shape[0]):
         for idx in target_indices:
@@ -74,9 +72,9 @@ X_val, y_val = create_dataset(data_scaled, val_idx)
 print(f"X_train shape: {X_train.shape}")
 print(f"X_val shape: {X_val.shape}")
 
-# ======================
-# 7. MODEL
-# ======================
+# 7. LSTM MODEL MİMARİSİNİN TASARLANMASI (DEEP LEARNING MODEL DESIGN)
+# Zaman serisindeki uzun dönemli bağımlılıkları yakalamak adına ardışık (Sequential)
+# bir LSTM mimarisi kurulmuş, aşırı öğrenmeyi (overfitting) engellemek için Dropout eklenmiştir.
 model = Sequential([
     Input(shape=(look_back, 3)),
     LSTM(64),
@@ -87,15 +85,14 @@ model = Sequential([
 
 model.compile(optimizer='adam', loss='mse')
 
+# Eğitim sürecini optimize etmek ve validasyon kaybının durakladığı yerde kesmek için:
 callback = EarlyStopping(
     monitor='val_loss',
     patience=10,
     restore_best_weights=True
 )
 
-# ======================
-# 8. TRAIN
-# ======================
+# 8. MODELİN EĞİTİLMESİ (MODEL TRAINING)
 model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
@@ -105,9 +102,7 @@ model.fit(
     verbose=1
 )
 
-# ======================
-# 9. TEST TAHMİN (Hata Düzeltildi)
-# ======================
+# 9. İLERİYE YÖNELİK ÖZYİNELEMELİ TAHMİN (RECURSIVE MULTI-STEP FORECASTING)
 results = {}
 
 for i, group_name in enumerate(df.index):
@@ -134,19 +129,18 @@ for i, group_name in enumerate(df.index):
         new_input = np.array([[[pred, s_val, c_val]]])
         current_batch = np.append(current_batch[:, 1:, :], new_input, axis=1)
 
-    # --- HATA ÇÖZÜMÜ: INVERSE TRANSFORM ---
-    # Scaler 7 grup beklediği için 7 sütunlu boş bir matris oluşturuyoruz
+    # --- Matris Boyut Uyuşmazlığı Çözümü ve Ters Dönüşüm (Inverse Transformation) ---
+    # Scaler mimarisi özgün veri boyutunu (grup sayısını) beklediğinden, tahmin sonuçları 
+    # geçici bir kukla matrise yerleştirilerek gerçek değer ölçeğine geri döndürülmüştür.
     dummy_mat = np.zeros((len(preds), n_groups))
-    # Sadece ilgili grubun (i) sütununa tahminleri koyuyoruz
     dummy_mat[:, i] = preds
-    # Tersine çevirip sadece kendi sütunumuzu geri alıyoruz
     preds_rescaled = scaler.inverse_transform(dummy_mat)[:, i]
     
+    # Satış adetlerinin negatif olamayacağı fiziki gerçeğinden hareketle alt sınır 0'a çekilmiştir.
     results[group_name] = np.maximum(0, np.round(preds_rescaled))
 
-# ======================
-# 10. TEST KARŞILAŞTIRMA
-# ======================
+# 10. MODEL PERFORMANSININ DEĞERLENDİRİLMESİ (MODEL EVALUATION)
+# Test setindeki gerçek değerler ile model tahminleri MAE metriği ile kıyaslanmaktadır.
 test_real = data[:, test_idx]
 
 print("\n--- TEST SONUÇLARI ---")
@@ -154,9 +148,7 @@ for i, group_name in enumerate(df.index):
     mae = mean_absolute_error(test_real[i], results[group_name])
     print(f"{group_name} TEST MAE: {mae:.2f}")
 
-# ======================
-# 11. EXCEL KAYDET
-# ======================
+# 11. BULGULARIN DIŞA AKTARILMASI (EXPORTING RESULTS)
 final_df = pd.DataFrame(results).T
 final_df.columns = df.columns[test_idx]
 final_df.to_excel("tahmin_test_sonuclari.xlsx")
