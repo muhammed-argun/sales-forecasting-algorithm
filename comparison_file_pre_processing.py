@@ -1,9 +1,8 @@
 import pandas as pd
 import os
 
-# Ayarları buraya gir
 klasor_yolu = r"E:\Muhammed Özel\Bitirme Projesi\test_verileri"
-subat_dosyasi = "2026.02.xlsx" # Dosya adın farklıysa güncelle
+subat_dosyasi = "2026.02.xlsx" 
 tam_yol = os.path.join(klasor_yolu, subat_dosyasi)
 
 def urun_siniflandir(urun_adi):
@@ -16,15 +15,12 @@ def urun_siniflandir(urun_adi):
     elif any(x in u for x in ["kpss", "dgs", "ales"]): return "Sınav Hazırlık (Memurluk/Lisansüstü)"
     return "Diğer"
 
-# Dosyayı oku ve kategorize et
 print(f"{subat_dosyasi} işleniyor...")
 df = pd.read_excel(tam_yol, engine='openpyxl')
 df['Sinif_Grubu'] = df['Ürün Adı'].apply(urun_siniflandir)
 
-# Grup bazında toplamları al
 ozet = df.groupby('Sinif_Grubu')['Net Satış Adedi'].sum().reset_index()
 
-# Karşılaştırma için Excel olarak kaydet
 cikti_adi = "2026_02_Kategorize_Analiz.xlsx"
 ozet.to_excel(cikti_adi, index=False)
 
